@@ -1,26 +1,26 @@
+# o_alert_bot.py   (nom du fichier sur Render : bot2.py ou o_alert_bot.py)
 import requests
 import time
 import schedule
 from telegram import Bot
 import os
 from typing import Dict, List, Tuple
-from flask import Flask, jsonify  # <-- Flask for keep-alive
+from flask import Flask, jsonify
+from threading import Thread
 
-# === CONFIGURATION (Environment Variables on Render) ===
+# ---------- CONFIG ----------
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-MARKET_CAP_LIMIT = 100_000_000   # 100 million USD
-OI_ALERT_RATIO = 0.25            # 25% threshold
+CHAT_ID        = os.getenv("CHAT_ID")
+MARKET_CAP_LIMIT = 100_000_000      # 100 M$
+OI_ALERT_RATIO   = 0.25             # 25 %
 
-# Validate config
 if not TELEGRAM_TOKEN or not CHAT_ID:
-    raise EnvironmentError("Please set TELEGRAM_TOKEN and CHAT_ID as environment variables on Render.")
+    raise EnvironmentError("TELEGRAM_TOKEN et CHAT_ID obligatoires (variables d’environnement).")
 
 bot = Bot(token=TELEGRAM_TOKEN)
 
-
+# ---------- FONCTIONS (identiques à la version précédente) ----------
 def get_market_data() -> Dict[str, Dict]:
-    """Fetch coins and market caps from CoinGecko (top 250 by volume)"""
     url = "https://api.coingecko.com/api/v3/coins/markets"
     params = {
         "vs_currency": "usd",
@@ -29,192 +29,112 @@ def get_market_data() -> Dict[str, Dict]:
         "page": 1,
         "sparkline": False
     }
-    
     try:
-        print("Fetching market data from CoinGecko...")
-        response = requests.get(url, params=params, timeout=15)
-        response.raise_for_status()
-        data = response.json()
-
+        print("Récupération CoinGecko...")
+        r = requests.get(url, params=params, timeout=15)
+        r.raise_for_status()
+        data = r.json()
         if not isinstance(data, list):
-            print(f"Unexpected CoinGecko response format: {type(data)}")
             return {}
-
         coins = {}
-        for coin in data:
-            symbol = coin.get("symbol", "").upper()
-            market_cap = coin.get("market_cap")
-            
-            if not symbol or market_cap is None:
-                continue
-                
-            if market_cap > 0 and market_cap < MARKET_CAP_LIMIT:
-                coins[symbol] = {
-                    "name": coin.get("name", "Unknown"),
-                    "market_cap": float(market_cap)
-                }
-        
-        print(f"Loaded {len(coins)} coins with market cap < ${MARKET_CAP_LIMIT/1e6:.0f}M")
+        for c in data:
+            sym = c.get("symbol", "").upper()
+            mc  = c.get("market_cap")
+            if sym and mc and 0 < mc < MARKET_CAP_LIMIT:
+                coins[sym] = {"name": c.get("name","?"), "market_cap": float(mc)}
+        print(f"{len(coins)} monnaies < ${MARKET_CAP_LIMIT/1e6:.0f}M")
         return coins
-
-    except requests.exceptions.RequestException as e:
-        print(f"CoinGecko API error: {e}")
-        return {}
     except Exception as e:
-        print(f"Unexpected error in get_market_data: {e}")
+        print("CoinGecko error:", e)
         return {}
-
 
 def get_all_bybit_oi() -> Dict[str, float]:
-    """Get Open Interest for ALL Bybit USDT perpetual futures"""
-    oi_data = {}
-
-    # Step 1: Get all linear (USDT) symbols
-    url_info = "https://api.bybit.com/v5/market/instruments-info"
+    oi = {}
+    # 1. Liste des contrats USDT
     try:
-        print("Fetching Bybit instrument list...")
-        resp = requests.get(url_info, params={"category": "linear"}, timeout=15)
-        resp.raise_for_status()
-        json_resp = resp.json()
-
-        if json_resp.get("retCode") != 0:
-            print(f"Bybit API error: {json_resp.get('retMsg')}")
-            return {}
-
-        symbols = [
-            i["symbol"] for i in json_resp["result"]["list"]
-            if i["symbol"].endswith("USDT") and i.get("status") == "Trading"
-        ]
-        print(f"Found {len(symbols)} active USDT perpetual contracts on Bybit.")
-
+        r = requests.get("https://api.bybit.com/v5/market/instruments-info",
+                         params={"category":"linear"}, timeout=15)
+        r.raise_for_status()
+        symbols = [i["symbol"] for i in r.json()["result"]["list"]
+                   if i["symbol"].endswith("USDT") and i.get("status")=="Trading"]
+        print(f"{len(symbols)} contrats USDT trouvés")
     except Exception as e:
-        print(f"Error fetching Bybit symbols: {e}")
+        print("Bybit symbols error:", e)
         return {}
 
-    # Step 2: Fetch Open Interest for each symbol
+    # 2. OI pour chaque symbole
     url_oi = "https://api.bybit.com/v5/market/open-interest"
-    batch_size = 10
-    for i in range(0, len(symbols), batch_size):
-        batch = symbols[i:i + batch_size]
-        for sym in batch:
-            try:
-                params = {"category": "linear", "symbol": sym}
-                r = requests.get(url_oi, params=params, timeout=10)
-                r.raise_for_status()
-                data = r.json()
-
-                if data.get("retCode") != 0:
-                    continue
-
-                oi_list = data.get("result", {}).get("list", [])
-                if oi_list:
-                    oi_usd = float(oi_list[0].get("openInterestUsd", 0))
-                    base_coin = sym.replace("USDT", "")
-                    oi_data[base_coin] = oi_usd
-
-                time.sleep(0.12)  # Stay under Bybit rate limit (~8 req/sec)
-
-            except Exception as e:
-                print(f"Error fetching OI for {sym}: {e}")
-                time.sleep(0.5)
-
-        if i + batch_size < len(symbols):
-            time.sleep(1)  # Be gentle on API
-
-    print(f"Retrieved OI for {len(oi_data)} symbols.")
-    return oi_data
-
+    for sym in symbols:
+        try:
+            r = requests.get(url_oi, params={"category":"linear","symbol":sym}, timeout=10)
+            r.raise_for_status()
+            d = r.json()
+            if d.get("retCode") != 0: continue
+            lst = d.get("result",{}).get("list",[])
+            if lst:
+                oi_usd = float(lst[0].get("openInterestUsd",0))
+                oi[sym.replace("USDT","")] = oi_usd
+            time.sleep(0.12)               # respect des limites Bybit
+        except Exception as e:
+            print(f"OI {sym} error:", e)
+    print(f"OI récupéré pour {len(oi)} symboles")
+    return oi
 
 def check_oi_ratio():
-    """Compare OI vs Market Cap and send alerts"""
-    print("Starting OI/Market Cap ratio check...")
-    mc_data = get_market_data()
-    oi_data = get_all_bybit_oi()
+    mc = get_market_data()
+    oi = get_all_bybit_oi()
+    if not mc or not oi: return
 
-    if not mc_data:
-        print("No market cap data available. Skipping this run.")
-        return
-    if not oi_data:
-        print("No OI data available. Skipping this run.")
-        return
-
-    alerts: List[Tuple[str, float, float, float]] = []
-    for symbol, coin in mc_data.items():
-        if symbol in oi_data:
-            oi = oi_data[symbol]
-            mc = coin["market_cap"]
-            if mc <= 0:
-                continue
-            ratio = oi / mc
+    alerts = []
+    for sym, coin in mc.items():
+        if sym in oi:
+            ratio = oi[sym] / coin["market_cap"]
             if ratio > OI_ALERT_RATIO:
-                alerts.append((symbol, ratio, mc, oi))
-
-    # Sort by ratio descending
+                alerts.append((sym, ratio, coin["market_cap"], oi[sym]))
     alerts.sort(key=lambda x: x[1], reverse=True)
 
     if alerts:
-        msg = "High OI/Market Cap Ratio (Bybit USDT)\n"
-        msg += f"Threshold: >{OI_ALERT_RATIO:.0%}\n\n"
-        for sym, ratio, mc, oi in alerts[:10]:  # Top 10 only
-            msg += f"{sym} • {ratio:.1%}\n"
-            msg += f"   MC: ${mc/1e6:.1f}M • OI: ${oi/1e6:.1f}M\n"
+        msg = "Ratio OI/MC élevé (Bybit USDT)\n_Seuil >25%_\n\n"
+        for sym, r, mc, oi_val in alerts[:10]:
+            msg += f"{sym} • {r:.1%}\n   MC ${mc/1e6:.1f}M • OI ${oi_val/1e6:.1f}M\n"
         try:
             bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
-            print(f"Sent {len(alerts)} alert(s) to Telegram.")
+            print(f"{len(alerts)} alerte(s) envoyée(s)")
         except Exception as e:
-            print(f"Failed to send Telegram message: {e}")
+            print("Telegram error:", e)
     else:
-        print("No coins exceeded OI/MC threshold.")
-
+        print("Aucun dépassement de seuil")
 
 def job():
-    """Scheduled job wrapper"""
-    print("\n" + "="*50)
-    print("Checking Bybit OI ratios...")
+    print("\n"+"="*50)
+    print("Vérification OI / MC")
     print("="*50)
     try:
         check_oi_ratio()
     except Exception as e:
-        print(f"Job failed: {e}")
-    print("Check complete.\n")
+        print("Job échoué:", e)
 
+# ---------- FLASK (keep-alive) ----------
+app = Flask(_name)          # <-- __name_ (pas name)
 
-# === FLASK APP FOR WEB SERVICE (KEEP-ALIVE) ===
-app = Flask(_name_)
-
-@app.route('/health', methods=['GET'])
+@app.route('/health')
 def health():
-    return jsonify({"status": "ok", "bot": "running"}), 200
+    return jsonify(status="ok", bot="running")
 
-@app.route('/', methods=['GET'])
+@app.route('/')
 def home():
-    return jsonify({
-        "message": "OI Alert Bot is alive!",
-        "next_check": "every 5 minutes",
-        "docs": "Visit /health for status"
-    }), 200
+    return jsonify(message="Bot OI actif – checks toutes les 5 min")
 
-
-def run_bot():
-    """Run the scheduler in a background thread"""
-    print("Starting bot thread...")
-    job()  # Run immediately
+# ---------- LANCEMENT ----------
+def run_scheduler():
+    job()                                 # 1er run immédiat
     schedule.every(5).minutes.do(job)
     while True:
         schedule.run_pending()
         time.sleep(5)
 
-
-# === MAIN ENTRYPOINT ===
 if _name_ == "_main_":
-    from threading import Thread
-
-    # Start bot in background
-    bot_thread = Thread(target=run_bot, daemon=True)
-    bot_thread.start()
-
-    print("Bot thread started. Starting Flask server on port $PORT...")
-
-    # Render provides PORT env var
+    Thread(target=run_scheduler, daemon=True).start()
+    print("Thread bot démarré – lancement Flask")
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
