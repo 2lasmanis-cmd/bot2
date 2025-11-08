@@ -3,9 +3,10 @@ import time
 import schedule
 from telegram import Bot
 import os
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple
+from flask import Flask, jsonify  # <-- Flask for keep-alive
 
-# === CONFIGURATION (Use Environment Variables on Render) ===
+# === CONFIGURATION (Environment Variables on Render) ===
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 MARKET_CAP_LIMIT = 100_000_000   # 100 million USD
@@ -107,7 +108,6 @@ def get_all_bybit_oi() -> Dict[str, float]:
 
                 oi_list = data.get("result", {}).get("list", [])
                 if oi_list:
-                    oi_value = float(oi_list[0].get("openInterest", 0))
                     oi_usd = float(oi_list[0].get("openInterestUsd", 0))
                     base_coin = sym.replace("USDT", "")
                     oi_data[base_coin] = oi_usd
@@ -179,26 +179,42 @@ def job():
     print("Check complete.\n")
 
 
-# === MAIN ===
-if _name_ == "_main_":
-    print("OI Alert Bot started (Bybit ALL pairs, 5min)...")
-    
-    # Run immediately on start
-    job()
-    
-    # Schedule every 5 minutes
+# === FLASK APP FOR WEB SERVICE (KEEP-ALIVE) ===
+app = Flask(_name_)
+
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({"status": "ok", "bot": "running"}), 200
+
+@app.route('/', methods=['GET'])
+def home():
+    return jsonify({
+        "message": "OI Alert Bot is alive!",
+        "next_check": "every 5 minutes",
+        "docs": "Visit /health for status"
+    }), 200
+
+
+def run_bot():
+    """Run the scheduler in a background thread"""
+    print("Starting bot thread...")
+    job()  # Run immediately
     schedule.every(5).minutes.do(job)
-    
-    print("Scheduler active. Waiting for next run...\n")
-    
-    # Keep alive loop
     while True:
-        try:
-            schedule.run_pending()
-            time.sleep(5)
-        except KeyboardInterrupt:
-            print("\nBot stopped by user.")
-            break
-        except Exception as e:
-            print(f"Unexpected error in main loop: {e}")
-            time.sleep(10)
+        schedule.run_pending()
+        time.sleep(5)
+
+
+# === MAIN ENTRYPOINT ===
+if _name_ == "_main_":
+    from threading import Thread
+
+    # Start bot in background
+    bot_thread = Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+
+    print("Bot thread started. Starting Flask server on port $PORT...")
+
+    # Render provides PORT env var
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
