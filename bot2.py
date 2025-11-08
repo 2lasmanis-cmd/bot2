@@ -133,9 +133,10 @@ def run_scheduler():
         schedule.run_pending()
         time.sleep(5)
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     Thread(target=run_scheduler, daemon=True).start()
     print("Thread bot démarré – lancement Flask")
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
 
