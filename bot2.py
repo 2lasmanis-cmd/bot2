@@ -123,8 +123,17 @@ def health():
 
 @app.route('/')
 def home():
-    return jsonify(message="Bot OI actif – checks toutes les 5 min")
-
+    return jsonify({
+        "bot": "OI Alert Bot (Bybit + CoinGecko)",
+        "status": "LIVE",
+        "url": "https://bot2-p6zp.onrender.com",
+        "check_interval": "5 minutes",
+        "endpoints": {
+            "/": "this page",
+            "/health": "status check (used by Render)"
+        },
+        "last_update": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+    }), 200
 # ---------- LANCEMENT ----------
 def run_scheduler():
     job()                                 # 1er run immédiat
@@ -138,5 +147,6 @@ if __name__ == "__main__":
     print("Thread bot démarré – lancement Flask")
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
 
 
