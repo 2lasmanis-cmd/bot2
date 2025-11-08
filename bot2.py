@@ -115,7 +115,7 @@ def job():
         print("Job échoué:", e)
 
 # ---------- FLASK (keep-alive) ----------
-app = Flask(_name)          # <-- __name_ (pas name)
+app = Flask(__name__)          # <-- __name_ (pas name)
 
 @app.route('/health')
 def health():
@@ -138,3 +138,4 @@ if _name_ == "_main_":
     print("Thread bot démarré – lancement Flask")
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
